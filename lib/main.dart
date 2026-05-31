@@ -1,6 +1,8 @@
 import 'dart:io';
 import 'dart:convert';
+import 'dart:typed_data'; // <-- Ini dia yang tadi kurang biar Uint8List kebaca di Web!
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:geolocator/geolocator.dart';
 import 'package:camera/camera.dart';
 import 'package:intl/intl.dart';
@@ -11,7 +13,7 @@ void main() async {
   try {
     await availableCameras();
   } catch (e) {
-    debugPrint("Kamera error: $e");
+    debugPrint("Kamera error atau tidak didukung di platform ini: $e");
   }
   runApp(
     MaterialApp(
@@ -33,7 +35,9 @@ class _AuthPageState extends State<AuthPage> {
   bool _obscurePassword = true;
   final TextEditingController _userController = TextEditingController();
   final TextEditingController _passController = TextEditingController();
+
   String? _tempFacePath;
+  Uint8List? _webImageBytes;
 
   void _submit() async {
     String user = _userController.text.trim();
@@ -54,12 +58,16 @@ class _AuthPageState extends State<AuthPage> {
         _msg("Username atau Password salah!");
       }
     } else {
-      if (_tempFacePath == null) {
+      if (_tempFacePath == null && _webImageBytes == null) {
         _msg("Wajib Verifikasi Wajah saat Pendaftaran!");
         return;
       }
       await prefs.setString("pwd_$user", pass);
-      await prefs.setString("face_$user", _tempFacePath!);
+      if (kIsWeb && _webImageBytes != null) {
+        await prefs.setString("face_web_$user", base64Encode(_webImageBytes!));
+      } else if (_tempFacePath != null) {
+        await prefs.setString("face_$user", _tempFacePath!);
+      }
       _msg("Daftar Berhasil! Silahkan Login");
       setState(() {
         isLogin = true;
@@ -87,7 +95,7 @@ class _AuthPageState extends State<AuthPage> {
               ),
               const SizedBox(height: 10),
               Text(
-                isLogin ? "Portal Login Karyawan" : "Registrasi Akun & Wajah",
+                isLogin ? "Login" : "Registrasi Akun & Wajah",
                 style: const TextStyle(
                   fontSize: 22,
                   fontWeight: FontWeight.bold,
@@ -128,27 +136,38 @@ class _AuthPageState extends State<AuthPage> {
                   onTap: () async {
                     final cams = await availableCameras();
                     if (!mounted) return;
-                    final XFile? photo = await Navigator.push(
+                    final dynamic photoData = await Navigator.push(
                       context,
                       MaterialPageRoute(
                         builder: (c) =>
                             CameraPage(cameras: cams, title: "Foto Registrasi"),
                       ),
                     );
-                    if (photo != null)
-                      setState(() => _tempFacePath = photo.path);
+                    if (photoData != null && photoData is Map) {
+                      setState(() {
+                        _tempFacePath = photoData['path'];
+                        _webImageBytes = photoData['bytes'];
+                      });
+                    }
                   },
                   child: CircleAvatar(
                     radius: 50,
                     backgroundColor: Colors.teal[50],
-                    child: _tempFacePath == null
+                    child: (_tempFacePath == null && _webImageBytes == null)
                         ? const Icon(Icons.add_a_photo, color: Colors.teal)
                         : ClipRRect(
                             borderRadius: BorderRadius.circular(50),
-                            child: Image.file(
-                              File(_tempFacePath!),
-                              fit: BoxFit.cover,
-                            ),
+                            child: kIsWeb
+                                ? Image.memory(
+                                    _webImageBytes!,
+                                    fit: BoxFit.cover,
+                                    width: 100,
+                                    height: 100,
+                                  )
+                                : Image.file(
+                                    File(_tempFacePath!),
+                                    fit: BoxFit.cover,
+                                  ),
                           ),
                   ),
                 ),
@@ -227,10 +246,9 @@ class _BerandaPageState extends State<BerandaPage> {
   bool _isMocked = false;
   String _waktuMasuk = "-";
   String _imgMasuk = "";
+  String _webImgMasukBase64 = "";
   String _ketMasuk = "";
   String _waktuPulang = "-";
-  String _imgPulang = "";
-  String _ketPulang = "";
 
   @override
   void initState() {
@@ -272,16 +290,22 @@ class _BerandaPageState extends State<BerandaPage> {
     setState(() {
       _waktuMasuk = prefs.getString("in_time_${widget.userName}") ?? "-";
       _imgMasuk = prefs.getString("in_img_${widget.userName}") ?? "";
+      _webImgMasukBase64 =
+          prefs.getString("in_web_img_${widget.userName}") ?? "";
       _ketMasuk = prefs.getString("in_ket_${widget.userName}") ?? "";
-      _waktuPulang = prefs.getString("out_time_${widget.userName}") ?? "-";
-      _imgPulang = prefs.getString("out_img_${widget.userName}") ?? "";
-      _ketPulang = prefs.getString("out_ket_${widget.userName}") ?? "";
     });
   }
 
   Future<void> _initLokasiFleksibel() async {
     if (!mounted) return;
     setState(() => _loadingLokasi = true);
+    if (kIsWeb) {
+      setState(() {
+        _isMocked = false;
+        _loadingLokasi = false;
+      });
+      return;
+    }
     try {
       LocationPermission permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
@@ -311,7 +335,7 @@ class _BerandaPageState extends State<BerandaPage> {
     final cams = await availableCameras();
     if (!mounted) return;
 
-    final Map<String, dynamic>? hasilKamera = await Navigator.push(
+    final dynamic hasilKamera = await Navigator.push(
       context,
       MaterialPageRoute(
         builder: (c) => CameraPage(
@@ -322,7 +346,7 @@ class _BerandaPageState extends State<BerandaPage> {
       ),
     );
 
-    if (hasilKamera != null) {
+    if (hasilKamera != null && hasilKamera is Map) {
       bool wajahCocok = hasilKamera['wajahCocok'] ?? true;
       if (!wajahCocok) {
         _showDialogAlert(
@@ -331,11 +355,11 @@ class _BerandaPageState extends State<BerandaPage> {
         );
         return;
       }
-      _loadingSimulasi(hasilKamera['path'], tipe);
+      _loadingSimulasi(hasilKamera['path'] ?? "", hasilKamera['bytes'], tipe);
     }
   }
 
-  void _loadingSimulasi(String pathBaru, String tipe) {
+  void _loadingSimulasi(String pathBaru, dynamic bytesBaru, String tipe) {
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -356,10 +380,17 @@ class _BerandaPageState extends State<BerandaPage> {
             setState(() {
               _waktuMasuk = jamSkrg;
               _imgMasuk = pathBaru;
+              if (kIsWeb && bytesBaru != null) {
+                _webImgMasukBase64 = base64Encode(bytesBaru);
+              }
               _ketMasuk = "Area Kerja Kelapa Gading (0m)";
             });
             await prefs.setString("in_time_${widget.userName}", _waktuMasuk);
             await prefs.setString("in_img_${widget.userName}", _imgMasuk);
+            await prefs.setString(
+              "in_web_img_${widget.userName}",
+              _webImgMasukBase64,
+            );
             await prefs.setString("in_ket_${widget.userName}", _ketMasuk);
 
             _showDialogAlert(
@@ -382,15 +413,15 @@ class _BerandaPageState extends State<BerandaPage> {
 
             await prefs.remove("in_time_${widget.userName}");
             await prefs.remove("in_img_${widget.userName}");
+            await prefs.remove("in_web_img_${widget.userName}");
             await prefs.remove("in_ket_${widget.userName}");
 
             setState(() {
               _waktuMasuk = "-";
               _imgMasuk = "";
+              _webImgMasukBase64 = "";
               _ketMasuk = "";
               _waktuPulang = "-";
-              _imgPulang = "";
-              _ketPulang = "";
             });
 
             _showDialogAlert(
@@ -498,14 +529,16 @@ class _BerandaPageState extends State<BerandaPage> {
                         "Masuk",
                         _waktuMasuk,
                         _imgMasuk,
+                        _webImgMasukBase64,
                         _ketMasuk,
                         Colors.green,
                       ),
                       _statusCard(
                         "Pulang",
                         _waktuPulang,
-                        _imgPulang,
-                        _ketPulang,
+                        "",
+                        "",
+                        "",
                         Colors.orange,
                       ),
                     ],
@@ -542,9 +575,18 @@ class _BerandaPageState extends State<BerandaPage> {
     String title,
     String waktu,
     String imgPath,
+    String base64Web,
     String ket,
     Color col,
   ) {
+    Widget imageWidget = const Icon(Icons.no_photography, color: Colors.grey);
+
+    if (kIsWeb && base64Web.isNotEmpty) {
+      imageWidget = Image.memory(base64Decode(base64Web), fit: BoxFit.cover);
+    } else if (!kIsWeb && imgPath.isNotEmpty) {
+      imageWidget = Image.file(File(imgPath), fit: BoxFit.cover);
+    }
+
     return Column(
       children: [
         Text(
@@ -560,12 +602,10 @@ class _BerandaPageState extends State<BerandaPage> {
             borderRadius: BorderRadius.circular(15),
             border: Border.all(color: Colors.teal.shade100),
           ),
-          child: imgPath.isNotEmpty
-              ? ClipRRect(
-                  borderRadius: BorderRadius.circular(15),
-                  child: Image.file(File(imgPath), fit: BoxFit.cover),
-                )
-              : const Icon(Icons.no_photography, color: Colors.grey),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(15),
+            child: imageWidget,
+          ),
         ),
         const SizedBox(height: 5),
         Text(
@@ -954,6 +994,31 @@ class _CameraPageState extends State<CameraPage> {
     }
   }
 
+  void _kirimFotoBack(bool cocok) async {
+    if (_controller != null && _controller!.value.isInitialized) {
+      final img = await _controller!.takePicture();
+      Uint8List? bytesData;
+      if (kIsWeb) {
+        bytesData = await img.readAsBytes();
+      }
+      if (mounted) {
+        Navigator.pop(context, {
+          'path': img.path,
+          'bytes': bytesData,
+          'wajahCocok': cocok,
+        });
+      }
+    } else {
+      if (mounted) {
+        Navigator.pop(context, {
+          'path': '',
+          'bytes': Uint8List(0),
+          'wajahCocok': cocok,
+        });
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -963,7 +1028,12 @@ class _CameraPageState extends State<CameraPage> {
           Expanded(
             child: (_controller?.value.isInitialized ?? false)
                 ? CameraPreview(_controller!)
-                : const Center(child: CircularProgressIndicator()),
+                : const Center(
+                    child: Text(
+                      "Kamera Siap Digunakan / Mode Simulasi Web",
+                      style: TextStyle(color: Colors.white),
+                    ),
+                  ),
           ),
           Container(
             padding: const EdgeInsets.all(20),
@@ -972,15 +1042,7 @@ class _CameraPageState extends State<CameraPage> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 ElevatedButton(
-                  onPressed: () async {
-                    final img = await _controller?.takePicture();
-                    if (mounted) {
-                      Navigator.pop(context, {
-                        'path': img?.path,
-                        'wajahCocok': true,
-                      });
-                    }
-                  },
+                  onPressed: () => _kirimFotoBack(true),
                   style: ElevatedButton.styleFrom(
                     minimumSize: const Size(double.infinity, 50),
                     backgroundColor: Colors.teal,
@@ -991,15 +1053,7 @@ class _CameraPageState extends State<CameraPage> {
                 if (widget.isVerificationMode) ...[
                   const SizedBox(height: 10),
                   OutlinedButton(
-                    onPressed: () async {
-                      final img = await _controller?.takePicture();
-                      if (mounted) {
-                        Navigator.pop(context, {
-                          'path': img?.path,
-                          'wajahCocok': false,
-                        });
-                      }
-                    },
+                    onPressed: () => _kirimFotoBack(false),
                     style: OutlinedButton.styleFrom(
                       minimumSize: const Size(double.infinity, 45),
                       side: const BorderSide(color: Colors.red),
